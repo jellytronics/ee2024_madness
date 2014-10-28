@@ -477,8 +477,8 @@ int main (void) {
     	//accelerationHandler();
     	//printf("Zvar: %d | Z: %d | pointer %d\n", accCB.zvar, accCB.z[accCB.pointer], accCB.pointer);
 
-    	//checkTempLight();
-    	activateBuzzer();
+    	checkTempLight();
+    	//activateBuzzer();
     }
 
 
