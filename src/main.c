@@ -1,15 +1,3 @@
-/*
- *
- * EE2024 Project for kicks
- * @author Edward
- * @author Jeremias
- *
- * Parts of code adapted from source code obtained
- * from http://www.youtube.com/watch?v=BmRyRGZSRng
- *
- */
-
-
 #include "lpc17xx_pinsel.h"
 #include "lpc17xx_gpio.h"
 #include "lpc17xx_i2c.h"
@@ -50,7 +38,7 @@ const uint32_t reportingTime = 5;
 const uint32_t distressTime = 1;
 
 const uint32_t LIGHT_THRESHOLD = 800;
-const uint32_t TEMP_THRESHOLD = 260;
+const uint32_t TEMP_WARN = 260;
 
 const uint32_t note = 1703;
 
@@ -64,8 +52,21 @@ const char *DEBUG_SYSTICK = "SYSTICK INIT ERROR\n";
 static uint32_t temperature = 0;
 static uint32_t lightIntensity = 0;
 static uint32_t msTicks = 0;
-volatile static uint8_t buzzerState = 0;
+volatile static uint8_t ALARM_OFF = 0;
 static uint8_t temperatureLock = 0;
+static uint32_t ch = 48;
+static uint32_t ledtime = 1000;
+
+//typedef and structures
+typedef enum {BRIGHT, DIM, RELAY} timingState_t;
+
+struct timingState {
+	timingState_t state;
+	uint8_t accelerationTime;
+	uint32_t tempLightTime;
+};
+
+static struct timingState timeState;
 
 /*
  * Circular Buffer
@@ -87,7 +88,7 @@ struct accelerationCB {
 static struct accelerationCB accCB;
 
 /**
- * Initializes Accelerometer with offset
+ * Initializes Accelerometer and variance calculations
  */
 
 void initAccCB(void){
@@ -101,34 +102,9 @@ void initAccCB(void){
 	accCB.zvar = 0;
 }
 
-/*
- * Timing States
- */
-
-typedef enum {BRIGHT, DIM, RELAY} timingState_t;
-
-struct timingState {
-	timingState_t state;
-	uint8_t accelerationTime;
-	uint32_t tempLightTime;
-};
-
-static struct timingState timeState;
-
-void initTimingState(void){
-	timeState.state = BRIGHT;
-	timeState.accelerationTime = ACC_ST_BRIGHT;
-	timeState.tempLightTime = LS_TS_ST_BRIGHT;
-}
-
-
 void nextElements(void){
 	accCB.pointer = (accCB.pointer + 1) % ACCELEROMETER_BUFFER;
 }
-
-/**
- * Accelerometer Handler
- */
 
 void accelerationHandler(void){
 	nextElements();
@@ -158,6 +134,38 @@ int calcAccVar(void){
 	return accCB.zvar;
 }
 
+void checkTempLight(void){
+	temperatureLock = 1;
+	temperature = temp_read();
+	temperatureLock = 0;
+	lightIntensity = light_read();
+
+	if (timeState.state == RELAY){
+		return;
+	}
+
+	if (lightIntensity < LIGHT_THRESHOLD){
+		timeState.state = DIM;
+		timeState.accelerationTime = ACC_ST_DIM_RELAY;
+		timeState.tempLightTime = LS_TS_ST_DIM_RELAY;
+	} else {
+		timeState.state = BRIGHT;
+		timeState.accelerationTime = ACC_ST_BRIGHT;
+		timeState.tempLightTime = LS_TS_ST_BRIGHT;
+	}
+
+	printf("Temp: %d | Light: %d\n", temperature, lightIntensity);
+	printf("AccTime : %d | TempLightTime : %d\n", timeState.accelerationTime, timeState.tempLightTime);
+}
+
+static void led7seg_update(void){
+	if (ch < 57)
+	ch++;
+			else
+				ch = 48;
+			led7seg_setChar(ch, 0);
+}
+
 void SysTick_Handler(void) {
 	/*
 	 * Parallel control loop
@@ -166,9 +174,25 @@ void SysTick_Handler(void) {
 	 *
 	 */
 	msTicks++;
-	printf("Time: %d\n", msTicks);
 	if (msTicks % timeState.accelerationTime == 0 && temperatureLock == 0){
 		accelerationHandler();
+	}
+	if (msTicks % ledtime == 0){
+		led7seg_update();
+	}
+
+}
+
+void initSystick() {
+	/**
+	 * Configure Systick
+	 */
+
+	if (SysTick_Config(SystemCoreClock / 1000)) {
+		printf(DEBUG_SYSTICK);
+		while (1)
+			;
+
 	}
 }
 
@@ -176,7 +200,23 @@ uint32_t getTicks(void){
     return msTicks;
 }
 
+static void sysTick_delay(uint32_t delayTicks){
+uint32_t currentTicks;
+currentTicks = msTicks;
+while ((msTicks - currentTicks) < delayTicks);
+}
 
+/*
+ * Timing States
+ */
+
+
+
+void initTimingState(void){
+	timeState.state = BRIGHT;
+	timeState.accelerationTime = ACC_ST_BRIGHT;
+	timeState.tempLightTime = LS_TS_ST_BRIGHT;
+}
 
 /**
  * Synchronous Serial Port (SSP) is a controller that supports the Serial Peripheral Interface (SPI), 4-wire Synchronous Serial Interface (SSI), and Microwire serial buses
@@ -255,52 +295,25 @@ static void init_GPIO(void)
 	 */
 
 	PINSEL_CFG_Type PinCfg;
+	//initialise SW3
+	PinCfg.Funcnum = 1;
+	PinCfg.OpenDrain = 0;
+	PinCfg.Pinmode = 0;
+	PinCfg.Portnum = 2;
+	PinCfg.Pinnum = 10;
+	PINSEL_ConfigPin(&PinCfg);
+	GPIO_SetDir(2, 1 << 10, 0);
+
+	//initialise SW4
 	PinCfg.Funcnum = 0;
 	PinCfg.OpenDrain = 0;
 	PinCfg.Pinmode = 0;
 	PinCfg.Portnum = 1;
 	PinCfg.Pinnum = 31;
 	PINSEL_ConfigPin(&PinCfg);
-
 	GPIO_SetDir(1, 1 << 31, 0);
+	GPIO_ClearValue(1, 1 << 31);
 
-}
-
-void initSystick() {
-	/**
-	 * Configure Systick
-	 */
-
-	if (SysTick_Config(SystemCoreClock / 1000)) {
-		printf(DEBUG_SYSTICK);
-		while (1)
-			;
-
-	}
-}
-
-void checkTempLight(void){
-	temperatureLock = 1;
-	temperature = temp_read();
-	temperatureLock = 0;
-	lightIntensity = light_read();
-
-	if (timeState.state == RELAY){
-		return;
-	}
-
-	if (lightIntensity < LIGHT_THRESHOLD){
-		timeState.state = DIM;
-		timeState.accelerationTime = ACC_ST_DIM_RELAY;
-		timeState.tempLightTime = LS_TS_ST_DIM_RELAY;
-	} else {
-		timeState.state = BRIGHT;
-		timeState.accelerationTime = ACC_ST_BRIGHT;
-		timeState.tempLightTime = LS_TS_ST_BRIGHT;
-	}
-
-	printf("Temp: %d | Light: %d\n", temperature, lightIntensity);
-	printf("AccTime : %d | TempLightTime : %d\n", timeState.accelerationTime, timeState.tempLightTime);
 }
 
 void buzzer_init(){
@@ -319,72 +332,26 @@ void buzzer_init(){
 
 void activateBuzzer(void) {
 
-	buzzerState = 1;
+	ALARM_OFF = 0;
 	led7seg_setChar('1',0);
-	while (buzzerState) {
-		/*
+	while (!ALARM_OFF) {
+
 		GPIO_SetValue(0, 1<<26);
 		Timer0_us_Wait(note / 2);
 
 		GPIO_ClearValue(0, 1<<26);
 		Timer0_us_Wait(note / 2);
-		*/
+
 	}
 	led7seg_setChar('2',0);
 }
 
 void enableSW3int(void){
 
-	//PINSEL_CFG_Type PinCfg;
-
-
-
-	/*
-	 * SW3
-	 */
-
-	/*
-
-	GPIO_SetDir(1,2<<10,0);
-
-	PinCfg.Funcnum = 1;
-	PinCfg.OpenDrain = 0;
-	PinCfg.Pinmode = 0;
-	PinCfg.Portnum = 2;
-	PinCfg.Pinnum = 10;
-	PINSEL_ConfigPin(&PinCfg);
-
-	*/
-
-	/*
-	 * SW4
-	 */
-
-	/*
-
-	GPIO_SetDir(1,1<<31,0);
-
-	PinCfg.Funcnum = 0;
-	PinCfg.OpenDrain = 0;
-	PinCfg.Pinmode = 0;
-	PinCfg.Portnum = 1;
-	PinCfg.Pinnum = 31;
-	PINSEL_ConfigPin(&PinCfg);
-
-
-
-	//Configure EINT0 interrupt
-	LPC_SC->EXTINT = 1;					//Clear existing interrupts
-	NVIC_ClearPendingIRQ(EINT0_IRQn);
-	NVIC_SetPriorityGrouping(4);
-	NVIC_SetPriority(EINT0_IRQn, NVIC_EncodePriority(4,0,0));
-	NVIC_EnableIRQ(EINT0_IRQn);
-
-	*/
+	PINSEL_CFG_Type PinCfg;
 
 	GPIO_SetDir(2,1<<10,0);
 
-	PINSEL_CFG_Type PinCfg;
 	PinCfg.Portnum = 2;
 	PinCfg.Pinnum = 10;
 	PinCfg.Funcnum = 1;
@@ -406,24 +373,10 @@ void enableSW3int(void){
 }
 
 void EINT0_IRQHandler(void){
-	//Set the flag to clear the alarm later
-	printf("BLAH3\n");
-	buzzerState = 0;
 	LPC_SC->EXTINT = 1;				//Clear EINT0 interrupt
 	LPC_GPIOINT->IO2IntClr = 1 << 10;
 	NVIC_ClearPendingIRQ(EINT0_IRQn);
 }
-
-void EINT3_IRQHandler(void){
-	printf("BLAH1\n");
-	if ((LPC_GPIOINT->IO2IntStatF >> 10) & 0x1){
-		printf("BLAH2\n");
-		buzzerState = 0;
-		LPC_GPIOINT->IO2IntClr = 1 << 10;
-		NVIC_ClearPendingIRQ(EINT3_IRQn);
-	}
-}
-
 
 
 int main (void) {
@@ -455,15 +408,20 @@ int main (void) {
     initAccCB();
     initSystick();
 
-    /*
-     * Main Control Loop
-     *
-     * 1)
-     *
-     */
-
+    enableSW3int();
     __enable_irq();
+
+    uint8_t btn1 = 1;
+
     while(TRUE){
+    checkTempLight();
+   btn1 = (GPIO_ReadValue(1)) >> 31 & 0x01;
+   if (btn1 == 0){
+    	ALARM_OFF = 1 ;
+    }
+    if (temperature >= TEMP_WARN && ALARM_OFF == 0){
+    	activateBuzzer();
+    }
 
     	/*
     	 * Acc test ? Passed
@@ -477,8 +435,8 @@ int main (void) {
     	//accelerationHandler();
     	//printf("Zvar: %d | Z: %d | pointer %d\n", accCB.zvar, accCB.z[accCB.pointer], accCB.pointer);
 
-    	//checkTempLight();
-    	activateBuzzer();
+
+    	//activateBuzzer();
     }
 
 
