@@ -48,6 +48,9 @@ const uint32_t LS_TS_ST_DIM_RELAY = 3000;
 
 const uint32_t reportingTime = 5;
 const uint32_t distressTime = 1;
+const uint32_t RELAY_RGB_TIME = 2000;
+const uint16_t allLedsOn = 0xff;
+const uint16_t allLedsOff = 0x0;
 
 const uint32_t LIGHT_THRESHOLD = 800;
 const uint32_t TEMP_THRESHOLD = 260;
@@ -66,6 +69,12 @@ static uint32_t lightIntensity = 0;
 static uint32_t msTicks = 0;
 volatile static uint8_t buzzerState = 0;
 static uint8_t temperatureLock = 0;
+static uint32_t rgbState = 0;
+
+static uint32_t lcdNumber = 0;
+static uint32_t lastLcdTick = 0;
+static uint32_t ledTime = 1000;
+static uint32_t ASCII_Number = 48;
 
 /*
  * Circular Buffer
@@ -87,7 +96,7 @@ struct accelerationCB {
 static struct accelerationCB accCB;
 
 /**
- * Initializes Accelerometer with offset
+ * Initializes Accelerometer and variance calculations
  */
 
 void initAccCB(void){
@@ -121,6 +130,15 @@ void initTimingState(void){
 	timeState.tempLightTime = LS_TS_ST_BRIGHT;
 }
 
+/*
+ * implement check here
+ */
+
+static void led7seg_update(void){
+	lcdNumber = (lcdNumber + 1) % 10;
+	led7seg_setChar(lcdNumber + ASCII_Number, 0);
+}
+
 
 void nextElements(void){
 	accCB.pointer = (accCB.pointer + 1) % ACCELEROMETER_BUFFER;
@@ -135,7 +153,7 @@ void accelerationHandler(void){
 	acc_read(&accCB.x[accCB.pointer], &accCB.y[accCB.pointer], &accCB.z[accCB.pointer]);
 }
 
-int calcAccVar(void){
+int calcAccVarZ(void){
 
 	int sumz = 0;
 	int meanz = 0;
@@ -158,6 +176,15 @@ int calcAccVar(void){
 	return accCB.zvar;
 }
 
+void toggleRGBLed(void) {
+	if (rgbState == 0){
+		GPIO_SetValue(2, 1);
+	}else{
+		GPIO_ClearValue(2, 1);
+	}
+	rgbState = (rgbState + 1) % 2;
+}
+
 void SysTick_Handler(void) {
 	/*
 	 * Parallel control loop
@@ -166,9 +193,15 @@ void SysTick_Handler(void) {
 	 *
 	 */
 	msTicks++;
-	printf("Time: %d\n", msTicks);
 	if (msTicks % timeState.accelerationTime == 0 && temperatureLock == 0){
 		accelerationHandler();
+	}
+	if (msTicks % ledTime == 0){
+		led7seg_update();
+	}
+	if ((msTicks % RELAY_RGB_TIME == 0) && timeState.state == RELAY){
+		printf("WTF!\n");
+		toggleRGBLed();
 	}
 }
 
@@ -320,32 +353,23 @@ void buzzer_init(){
 void activateBuzzer(void) {
 
 	buzzerState = 1;
-	led7seg_setChar('1',0);
-	while (buzzerState) {
-		/*
+	while (buzzerState && ((FIO_ReadValue(1) >> 31) ^ 0x0)) {
 		GPIO_SetValue(0, 1<<26);
 		Timer0_us_Wait(note / 2);
 
 		GPIO_ClearValue(0, 1<<26);
 		Timer0_us_Wait(note / 2);
-		*/
 	}
-	led7seg_setChar('2',0);
+	buzzerState = 0;
 }
 
-void enableSW3int(void){
+void enableButtonsInterrupts(void){
 
-	//PINSEL_CFG_Type PinCfg;
-
-
+	PINSEL_CFG_Type PinCfg;
 
 	/*
 	 * SW3
 	 */
-
-	/*
-
-	GPIO_SetDir(1,2<<10,0);
 
 	PinCfg.Funcnum = 1;
 	PinCfg.OpenDrain = 0;
@@ -354,15 +378,13 @@ void enableSW3int(void){
 	PinCfg.Pinnum = 10;
 	PINSEL_ConfigPin(&PinCfg);
 
-	*/
+	GPIO_SetDir(2, 1 << 10, 0);
+
+	LPC_GPIOINT->IO2IntEnF |= 1<<10;
 
 	/*
 	 * SW4
 	 */
-
-	/*
-
-	GPIO_SetDir(1,1<<31,0);
 
 	PinCfg.Funcnum = 0;
 	PinCfg.OpenDrain = 0;
@@ -371,57 +393,74 @@ void enableSW3int(void){
 	PinCfg.Pinnum = 31;
 	PINSEL_ConfigPin(&PinCfg);
 
+	GPIO_SetDir(1, 1 << 31, 0);
 
+	/*
+	 * RGB LED RED P1 9
+	 */
 
-	//Configure EINT0 interrupt
-	LPC_SC->EXTINT = 1;					//Clear existing interrupts
+	/*
+	 * Red LED of RGB light due to conflict with OLED
+	 */
+
+	GPIO_SetDir(2, 1, 1);
+	GPIO_SetDir(1, 1 << 9, 1);
+
+	LPC_SC->EXTINT = 1;
+	/*
 	NVIC_ClearPendingIRQ(EINT0_IRQn);
 	NVIC_SetPriorityGrouping(4);
 	NVIC_SetPriority(EINT0_IRQn, NVIC_EncodePriority(4,0,0));
 	NVIC_EnableIRQ(EINT0_IRQn);
-
 	*/
 
-	GPIO_SetDir(2,1<<10,0);
-
-	PINSEL_CFG_Type PinCfg;
-	PinCfg.Portnum = 2;
-	PinCfg.Pinnum = 10;
-	PinCfg.Funcnum = 1;
-	PinCfg.OpenDrain = 0;
-	PinCfg.Pinmode = 0;
-	PINSEL_ConfigPin(&PinCfg);
-
-	LPC_GPIOINT->IO2IntEnF |= 1<<10;
-
-	NVIC_EnableIRQ(EINT0_IRQn);
-
-	//LPC_SC->EXTINT = 1;
-	//NVIC_ClearPendingIRQ(EINT3_IRQn);
-	//NVIC_SetPriorityGrouping(4);
-	//NVIC_SetPriority(EINT3_IRQn, NVIC_EncodePriority(4,2,0));
+	NVIC_ClearPendingIRQ(EINT3_IRQn);
+	NVIC_SetPriorityGrouping(4);
+	NVIC_SetPriority(EINT3_IRQn, NVIC_EncodePriority(4,2,0));
 	NVIC_EnableIRQ(EINT3_IRQn);
+
+	NVIC_ClearPendingIRQ(UART3_IRQn);
+	NVIC_SetPriorityGrouping(4);
+	NVIC_SetPriority(UART3_IRQn, NVIC_EncodePriority(4,3,0));
+	NVIC_EnableIRQ(UART3_IRQn);
+
+
 
 
 }
 
 void EINT0_IRQHandler(void){
-	//Set the flag to clear the alarm later
-	printf("BLAH3\n");
-	buzzerState = 0;
-	LPC_SC->EXTINT = 1;				//Clear EINT0 interrupt
+
+	printf("EINT0\n");
+
+	LPC_SC->EXTINT = 1;
 	LPC_GPIOINT->IO2IntClr = 1 << 10;
 	NVIC_ClearPendingIRQ(EINT0_IRQn);
 }
 
+
+
 void EINT3_IRQHandler(void){
-	printf("BLAH1\n");
-	if ((LPC_GPIOINT->IO2IntStatF >> 10) & 0x1){
-		printf("BLAH2\n");
-		buzzerState = 0;
-		LPC_GPIOINT->IO2IntClr = 1 << 10;
-		NVIC_ClearPendingIRQ(EINT3_IRQn);
+	printf("EINT3\n");
+
+	if (timeState.state != RELAY){
+		printf("RELAY\n");
+		timeState.state = RELAY;
+		timeState.accelerationTime = ACC_ST_DIM_RELAY;
+		timeState.tempLightTime = LS_TS_ST_DIM_RELAY;
+		pca9532_setLeds(allLedsOff, 0xffff);
+	}else{
+		timeState.state = BRIGHT;
+		printf("BRIGHT\n");
+		timeState.accelerationTime = ACC_ST_BRIGHT;
+		timeState.tempLightTime = LS_TS_ST_BRIGHT;
+		pca9532_setLeds(allLedsOn, 0xffff);
 	}
+	toggleRGBLed();
+
+	LPC_SC->EXTINT = 1;
+	LPC_GPIOINT->IO2IntClr = 1 << 10;
+	NVIC_ClearPendingIRQ(EINT3_IRQn);
 }
 
 
@@ -438,16 +477,14 @@ int main (void) {
     init_ssp();
     init_GPIO();
 
+
     led7seg_init();
     led7seg_setChar(' ',0);
     pca9532_init();
     joystick_init();
     acc_init();
     oled_init();
-    /*
-     * Red LED of RGB light due to conflict with OLED
-     */
-    GPIO_SetDir(2,1,1);
+
     temp_init(&getTicks);
     eeprom_init();
     light_enable();
@@ -462,6 +499,9 @@ int main (void) {
      *
      */
 
+    pca9532_setLeds(allLedsOn, 0xffff);
+    initTimingState();
+    enableButtonsInterrupts();
     __enable_irq();
     while(TRUE){
 
@@ -469,16 +509,21 @@ int main (void) {
     	 * Acc test ? Passed
     	 */
 
-
-    	//printf("X: %d | Y: %d | Z: %d | pointer: %d\n", accCB.x[accCB.pointer], accCB.y[accCB.pointer], accCB.z[accCB.pointer], accCB.pointer);
+    	printf("mean: %d \n", calcAccVarZ());
+    	printf("X: %d | Y: %d | Z: %d | pointer: %d\n", accCB.x[accCB.pointer], accCB.y[accCB.pointer], accCB.z[accCB.pointer], accCB.pointer);
     	//calcAccVar();
-    	//printf("Xvar: %d | Yvar: %d | Zvar: %d\n", accCB.xvar, accCB.yvar, accCB.zvar);
-    	//calcAccVar();
+    	//printf("Zvar: %d\n", accCB.xvar, accCB.yvar, accCB.zvar);
     	//accelerationHandler();
     	//printf("Zvar: %d | Z: %d | pointer %d\n", accCB.zvar, accCB.z[accCB.pointer], accCB.pointer);
 
-    	checkTempLight();
+    	//checkTempLight();
+
+    	//printf("Data: %d \n",FIO_ReadValue(1) >> 31);
     	//activateBuzzer();
+    	Timer0_Wait(1000);
+    	printf("oh noes \n");
+    	printf("RGBState: %d \n", rgbState);
+    	toggleRGBLed();
     }
 
 
