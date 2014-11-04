@@ -40,6 +40,8 @@
 
 
 #define ACCELEROMETER_BUFFER 10
+#define CHAR_ARRAY_BUFFER 100
+#define MESSAGE_WIDTH 100
 
 const uint8_t ACC_ST_BRIGHT = 50;
 const uint8_t ACC_ST_DIM_RELAY = 100;
@@ -54,19 +56,18 @@ const uint16_t allLedsOn = 0xff00;
 const uint16_t allLedsOff = 0x0;
 
 const uint32_t LIGHT_THRESHOLD = 800;
-const uint32_t TEMP_THRESHOLD = 310; //260
+const uint32_t TEMP_THRESHOLD = 330; //260
 
 const uint32_t note = 1703;
 
 const char *WELCOME_MESSAGE = "BOOTING\n";
 const char *DEBUG_SYSTICK = "SYSTICK INIT ERROR\n";
+const char *NODE_ID = "N001";
 
 /*
  * Program Variables
  */
 
-static uint32_t temperature = 0;
-static uint32_t lightIntensity = 0;
 static uint32_t msTicks = 0;
 static uint8_t buzzerState = 0;
 static uint8_t i2c0Lock = 0;
@@ -86,7 +87,7 @@ static char stateString[20];
  * Circular Buffer
  */
 
-struct accelerationCB {
+struct dataCB {
 	int pointer;
 	int8_t x[ACCELEROMETER_BUFFER];
 	int8_t y[ACCELEROMETER_BUFFER];
@@ -97,20 +98,24 @@ struct accelerationCB {
 	int xvar;
 	int yvar;
 	int zvar;
+	uint32_t lightIntensity;
+	uint32_t temperature;
 };
 
-static struct accelerationCB accCB;
+static struct dataCB dataBuffer;
 
 /**
  * Initializes Accelerometer and variance calculations
  */
 
 void initAccCB(void){
-	accCB.pointer = 0;
-	acc_read(&accCB.xoff, &accCB.yoff, &accCB.zoff);
-	accCB.xvar = 0;
-	accCB.yvar = 0;
-	accCB.zvar = 0;
+	dataBuffer.pointer = 0;
+	acc_read(&dataBuffer.xoff, &dataBuffer.yoff, &dataBuffer.zoff);
+	dataBuffer.xvar = 0;
+	dataBuffer.yvar = 0;
+	dataBuffer.zvar = 0;
+	dataBuffer.lightIntensity = 0;
+	dataBuffer.temperature = 0;
 }
 
 /*
@@ -154,7 +159,7 @@ static void led7seg_update(void){
 
 
 void nextElements(void){
-	accCB.pointer = (accCB.pointer + 1) % ACCELEROMETER_BUFFER;
+	dataBuffer.pointer = (dataBuffer.pointer + 1) % ACCELEROMETER_BUFFER;
 }
 
 /**
@@ -163,7 +168,7 @@ void nextElements(void){
 
 void accelerationHandler(void){
 	nextElements();
-	acc_read(&accCB.x[accCB.pointer], &accCB.y[accCB.pointer], &accCB.z[accCB.pointer]);
+	acc_read(&dataBuffer.x[dataBuffer.pointer], &dataBuffer.y[dataBuffer.pointer], &dataBuffer.z[dataBuffer.pointer]);
 }
 
 int calcAccVarZ(void){
@@ -174,19 +179,19 @@ int calcAccVarZ(void){
 	int index;
 
 	for (index = 0; index < ACCELEROMETER_BUFFER; index++){
-		//accCB.z[index] = accCB.z[index] - accCB.zoff;
-		sumz += accCB.z[index];
+		//dataBuffer.z[index] = dataBuffer.z[index] - dataBuffer.zoff;
+		sumz += dataBuffer.z[index];
 	}
 
 	meanz = sumz / ACCELEROMETER_BUFFER;
 
 	for (index = 0; index < ACCELEROMETER_BUFFER; index++){
-		sumSQz += (accCB.z[index] - meanz)*(accCB.z[index] - meanz);
+		sumSQz += (dataBuffer.z[index] - meanz)*(dataBuffer.z[index] - meanz);
 	}
 
-	accCB.zvar = sumSQz/ACCELEROMETER_BUFFER;
+	dataBuffer.zvar = sumSQz/ACCELEROMETER_BUFFER;
 
-	return accCB.zvar;
+	return dataBuffer.zvar;
 }
 
 void toggleRGBLed(void) {
@@ -201,8 +206,8 @@ void toggleRGBLed(void) {
 char* getState(void);
 
 void updateOLED(void){
-	sprintf(tempString, "Temp: %d.%d  ", temperature/10, temperature%10);
-	sprintf(lightString, "Lux: %d  ", lightIntensity);
+	sprintf(tempString, "Temp: %d.%d  ", dataBuffer.temperature/10, dataBuffer.temperature%10);
+	sprintf(lightString, "Lux: %d  ", dataBuffer.lightIntensity);
 	sprintf(varString, "Var: %d   ", calcAccVarZ());
 	sprintf(stateString, "State: %s  ", getState());
 	oled_putString(0, 1 + 8, tempString, OLED_COLOR_WHITE,OLED_COLOR_BLACK);
@@ -283,6 +288,130 @@ static void init_ssp(void)
 }
 
 /**
+ * UART
+ */
+
+static uint32_t UART_LOCK = 0;
+static uint32_t parseMessageReady = 0;
+static char circularCharBuffer[CHAR_ARRAY_BUFFER];
+static uint32_t rearPointer = 0;
+static char messageBuffer[CHAR_ARRAY_BUFFER];
+static char relayedMessage[MESSAGE_WIDTH];
+
+void UART3_IRQHandler(void){
+
+	if (UART_LOCK != 0){
+		return;
+	}
+
+	UART_LOCK = 1;
+    if(LPC_UART3->IIR & 0x1) return;
+    if(LPC_UART3->IIR & 0x4)
+	while(LPC_UART3->LSR & 0x1){
+		pushCharToStack(LPC_UART3->RBR);
+	}
+
+    UART_LOCK = 0;
+}
+
+void UART3_DISABLE_INT(void){
+	LPC_UART3->IER = 0;
+}
+
+void UART3_ENABLE_INT(){
+	LPC_UART3->IER = 0x1;
+}
+
+void pushCharToStack(uint8_t newChar){
+	if (newChar == '\r'){
+		parseMessageReady = 1;
+		return;
+	}
+
+	if ((rearPointer + 1) == CHAR_ARRAY_BUFFER){
+		return;
+	}
+
+	circularCharBuffer[rearPointer] = (char) newChar;
+	rearPointer++;
+}
+
+void parseMessage(void){
+
+	if (parseMessageReady == 0){
+		return;
+	}
+
+	while(UART_LOCK == 1){
+		;
+	}
+	UART_LOCK = 1;
+
+	/*
+	 * Sample Message
+	 * #N083_T23.1_L132_V450#/r
+	 */
+
+	if (circularCharBuffer[0] != "#" || circularCharBuffer[21] != "#" || circularCharBuffer[1] != "N" || circularCharBuffer[6] != "T" || circularCharBuffer[12] != "L" || circularCharBuffer[17] != "V"){
+		relayedMessage[0] = "0";
+		rearPointer = 0;
+		parseMessageReady = 0;
+		UART_LOCK = 0;
+		return;
+	}
+
+	strncpy(relayedMessage, circularCharBuffer + 1, MESSAGE_WIDTH);
+	rearPointer = 0;
+	parseMessageReady = 0;
+	UART_LOCK = 0;
+	return;
+}
+
+void printMessage(void){
+
+	if(relayedMessage[0] == "0"){
+		sprintf(messageBuffer, "%s_T%d.%d_L%d_V%d", NODE_ID, dataBuffer.temperature/10, dataBuffer.temperature%10, dataBuffer.lightIntensity, dataBuffer.zvar);
+	}else{
+		sprintf(messageBuffer, "%s_T%d.%d_L%d_V%d_%s", NODE_ID, dataBuffer.temperature/10, dataBuffer.temperature%10, dataBuffer.lightIntensity, dataBuffer.zvar, relayedMessage);
+	}
+
+	while(UART_LOCK == 1){
+		;
+	}
+	UART_LOCK = 1;
+	UART_SendString(LPC_UART3, (uint8_t*) messageBuffer);
+	UART_LOCK = 0;
+}
+
+void init_uart(void){
+
+
+	UART_CFG_Type uartCfg;
+	uartCfg.Baud_rate = 115200;
+	uartCfg.Databits = UART_DATABIT_8;
+	uartCfg.Parity = UART_PARITY_NONE;
+	uartCfg.Stopbits = UART_STOPBIT_1;
+
+	PINSEL_CFG_Type PinCfg;
+	PinCfg.Funcnum = 2;
+	PinCfg.Portnum = 0;
+	PinCfg.Pinnum = 0;
+	PINSEL_ConfigPin(&PinCfg);
+	PinCfg.Pinnum = 1;
+	PINSEL_ConfigPin(&PinCfg);
+
+	UART_LOCK = 1;
+	UART_Init(LPC_UART3, &uartCfg);
+	UART_TxCmd(LPC_UART3, ENABLE);
+	UART_SendString(LPC_UART3, (uint8_t*)"Jelly UART Initialized.\r\n");
+	UART_LOCK = 0;
+
+	UART3_ENABLE_INT();
+}
+
+
+
+/**
  * Inits I2C
  */
 
@@ -343,15 +472,15 @@ void initSystick() {
 
 void checkTempLight(void){
 
-	temperature = temp_read();
+	dataBuffer.temperature = temp_read();
 	i2c0Lock = 1;
-	lightIntensity = light_read();
+	dataBuffer.lightIntensity = light_read();
 	i2c0Lock = 0;
 	if (timeState.state == RELAY){
 		return;
 	}
 
-	if (lightIntensity < LIGHT_THRESHOLD){
+	if (dataBuffer.lightIntensity < LIGHT_THRESHOLD){
 		timeState.state = DIM;
 		timeState.accelerationTime = ACC_ST_DIM_RELAY;
 		timeState.tempLightTime = LS_TS_ST_DIM_RELAY;
@@ -371,7 +500,7 @@ void checkTempLight(void){
 		}
 	}
 
-	if (temperature >= TEMP_THRESHOLD){
+	if (dataBuffer.temperature >= TEMP_THRESHOLD){
 		if (buzzerState == 0){
 			buzzerState = 1;
 			activateBuzzer();
@@ -571,6 +700,7 @@ int main (void) {
     buzzer_init();
     initAccCB();
     initSystick();
+    init_uart();
 
     i2c0Lock = 1;
     pca9532_setLeds(allLedsOn, 0xffff);
