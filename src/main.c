@@ -10,6 +10,10 @@
  */
 
 
+
+#include "string.h"
+#include "stdio.h"
+
 #include "lpc17xx_pinsel.h"
 #include "lpc17xx_gpio.h"
 #include "lpc17xx_i2c.h"
@@ -56,13 +60,23 @@ const uint16_t allLedsOn = 0xff00;
 const uint16_t allLedsOff = 0x0;
 
 const uint32_t LIGHT_THRESHOLD = 800;
-const uint32_t TEMP_THRESHOLD = 330; //260
+const uint32_t TEMP_THRESHOLD = 260; //260
 
 const uint32_t note = 1703;
 
 const char *WELCOME_MESSAGE = "BOOTING\n";
 const char *DEBUG_SYSTICK = "SYSTICK INIT ERROR\n";
 const char *NODE_ID = "N001";
+
+/*
+ * Program declarations
+ *
+ * This is to prevent conflicting types error
+ *
+ */
+
+void pushCharToStack(uint8_t newChar);
+void activateBuzzer(void);
 
 /*
  * Program Variables
@@ -206,8 +220,8 @@ void toggleRGBLed(void) {
 char* getState(void);
 
 void updateOLED(void){
-	sprintf(tempString, "Temp: %d.%d  ", dataBuffer.temperature/10, dataBuffer.temperature%10);
-	sprintf(lightString, "Lux: %d  ", dataBuffer.lightIntensity);
+	sprintf(tempString, "Temp: %d.%d  ", (int) dataBuffer.temperature/10, (int) dataBuffer.temperature%10);
+	sprintf(lightString, "Lux: %d  ", (int) dataBuffer.lightIntensity);
 	sprintf(varString, "Var: %d   ", calcAccVarZ());
 	sprintf(stateString, "State: %s  ", getState());
 	oled_putString(0, 1 + 8, tempString, OLED_COLOR_WHITE,OLED_COLOR_BLACK);
@@ -352,8 +366,8 @@ void parseMessage(void){
 	 * #N083_T23.1_L132_V450#/r
 	 */
 
-	if (circularCharBuffer[0] != "#" || circularCharBuffer[21] != "#" || circularCharBuffer[1] != "N" || circularCharBuffer[6] != "T" || circularCharBuffer[12] != "L" || circularCharBuffer[17] != "V"){
-		relayedMessage[0] = "0";
+	if (circularCharBuffer[0] != '#' || circularCharBuffer[21] != '#' || circularCharBuffer[1] != 'N' || circularCharBuffer[6] != 'T' || circularCharBuffer[12] != 'L' || circularCharBuffer[17] != 'V'){
+		relayedMessage[0] = '\0';
 		rearPointer = 0;
 		parseMessageReady = 0;
 		UART_LOCK = 0;
@@ -367,12 +381,12 @@ void parseMessage(void){
 	return;
 }
 
-void printMessage(void){
+void printUARTMessage(void){
 
-	if(relayedMessage[0] == "0"){
-		sprintf(messageBuffer, "%s_T%d.%d_L%d_V%d", NODE_ID, dataBuffer.temperature/10, dataBuffer.temperature%10, dataBuffer.lightIntensity, dataBuffer.zvar);
+	if(relayedMessage[0] == '\0'){
+		sprintf(messageBuffer, "%s_T%d.%d_L%d_V%d", NODE_ID, (int) dataBuffer.temperature/10, (int) dataBuffer.temperature%10, (int) dataBuffer.lightIntensity, (int) dataBuffer.zvar);
 	}else{
-		sprintf(messageBuffer, "%s_T%d.%d_L%d_V%d_%s", NODE_ID, dataBuffer.temperature/10, dataBuffer.temperature%10, dataBuffer.lightIntensity, dataBuffer.zvar, relayedMessage);
+		sprintf(messageBuffer, "%s_T%d.%d_L%d_V%d_%s", NODE_ID, (int) dataBuffer.temperature/10, (int) dataBuffer.temperature%10, (int) dataBuffer.lightIntensity, (int) dataBuffer.zvar, relayedMessage);
 	}
 
 	while(UART_LOCK == 1){
@@ -525,13 +539,19 @@ void buzzer_init(){
 }
 
 void activateBuzzer(void) {
-	while(spiLock = 0){
+
+	/*
+	 * Handles both OLED and Buzzer
+	 */
+
+	while(spiLock == 1){
 		;
 	}
 	spiLock = 1;
 	oled_fillRect(0,9,95,40,OLED_COLOR_WHITE);
 	oled_putString(0,16, "Buzzer", OLED_COLOR_BLACK, OLED_COLOR_WHITE);
 	spiLock = 0;
+
 	while (((FIO_ReadValue(1) >> 31) ^ 0x0)) {
 		GPIO_SetValue(0, 1<<26);
 		Timer0_us_Wait(note / 2);
@@ -539,7 +559,8 @@ void activateBuzzer(void) {
 		GPIO_ClearValue(0, 1<<26);
 		Timer0_us_Wait(note / 2);
 	}
-	while(spiLock = 0){
+
+	while(spiLock == 1){
 			;
 	}
 	spiLock = 1;
@@ -552,14 +573,26 @@ void enableButtonsInterrupts(void){
 	PINSEL_CFG_Type PinCfg;
 
 	/*
-	 * SW3
+	 * SW1 - RESET
 	 */
 
 	PinCfg.Funcnum = 1;
 	PinCfg.OpenDrain = 0;
 	PinCfg.Pinmode = 0;
-	PinCfg.Portnum = 2;
-	PinCfg.Pinnum = 10;
+	PinCfg.Portnum = 0;
+	PinCfg.Pinnum = 0;
+
+	LPC_GPIOINT->IO0IntEnF |= 1<<0;
+
+	/*
+	 * SW3 - TOGGLE
+	 */
+
+	PinCfg.Funcnum = 1;
+	PinCfg.OpenDrain = 0;
+	PinCfg.Pinmode = 0;
+	PinCfg.Portnum = 1;
+	PinCfg.Pinnum = 1;
 	PINSEL_ConfigPin(&PinCfg);
 
 	GPIO_SetDir(2, 1 << 10, 0);
@@ -567,7 +600,7 @@ void enableButtonsInterrupts(void){
 	LPC_GPIOINT->IO2IntEnF |= 1<<10;
 
 	/*
-	 * SW4
+	 * SW4 - ALARM
 	 */
 
 	PinCfg.Funcnum = 0;
@@ -671,7 +704,7 @@ void EINT3_IRQHandler(void){
 static void GUI_drawTitlebar(void){
 	//We want to overwrite only the title bar portion which is (0,0) to (95,8)
     oled_fillRect(0,0,95,8,OLED_COLOR_WHITE);							//Black bg
-    oled_putString(1,1, "Edward | Jelly", OLED_COLOR_BLACK, OLED_COLOR_WHITE);	//White text on black bg
+    oled_putString(1, 1, "Edward | Jelly", OLED_COLOR_BLACK, OLED_COLOR_WHITE);	//White text on black bg
 }
 
 int main (void) {
@@ -728,6 +761,14 @@ int main (void) {
 			updateOLED();
 			spiLock = 0;
 		}
+
+    	parseMessage();
+
+    	/*
+    	 * Add timing for send Message -> printUARTMessage();
+    	 */
+
+
 
     }
 
