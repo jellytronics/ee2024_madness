@@ -43,24 +43,24 @@
  */
 
 
-#define N_SAMPLE 10
+#define ACCELEROMETER_BUFFER 10
 #define CHAR_ARRAY_BUFFER 100
 #define MESSAGE_WIDTH 20
 
 const uint8_t ACC_ST_BRIGHT = 50;
-const uint8_t ACC_ST_DIM = 100;
+const uint8_t ACC_ST_DIM_RELAY = 100;
 const uint32_t LS_TS_ST_BRIGHT = 1000;
-const uint32_t LS_TS_ST_DIM = 3000;
+const uint32_t LS_TS_ST_DIM_RELAY = 3000;
 
-const uint32_t REPORTING_TIME = 5000;
-const uint32_t DISTRESS_TIME = 1000;
+const uint32_t reportingTime = 5000;
+const uint32_t distressTime = 1000;
 const uint32_t RELAY_RGB_TIME = 2000;
 const uint32_t OLED_UPDATE = 500;
 const uint16_t allLedsOn = 0xff00;
 const uint16_t allLedsOff = 0x0;
 
-const uint32_t BRIGHT_CONDITION = 800;
-const uint32_t TEMP_WARN = 275; //260
+const uint32_t LIGHT_THRESHOLD = 800;
+const uint32_t TEMP_THRESHOLD = 260; //260
 
 const uint32_t note = 1703;
 
@@ -100,26 +100,39 @@ static char lightString[20];
 static char varString[20];
 static char stateString[20];
 
-static uint32_t UART_LOCK = 0;
-static uint32_t parseMessageReady = 0;
-static char circularCharBuffer[CHAR_ARRAY_BUFFER];
-static uint32_t rearPointer = 0;
-static char messageBuffer[CHAR_ARRAY_BUFFER];
-static char relayedMessage[MESSAGE_WIDTH];
-static uint32_t tempLightIntensity = 0;
-
 /*
- * Function Declarations
+ * Circular Buffer
  */
 
-char* getState(void);
+struct dataCB {
+	int pointer;
+	int8_t x[ACCELEROMETER_BUFFER];
+	int8_t y[ACCELEROMETER_BUFFER];
+	int8_t z[ACCELEROMETER_BUFFER];
+	int8_t xoff;
+	int8_t yoff;
+	int8_t zoff;
+	int xvar;
+	int yvar;
+	int zvar;
+	uint32_t lightIntensity;
+	uint32_t temperature;
+};
 
-/*
- * Systick
+static struct dataCB dataBuffer;
+
+/**
+ * Initializes Accelerometer and variance calculations
  */
 
-uint32_t getTicks(void){
-    return msTicks;
+void initAccCB(void){
+	dataBuffer.pointer = 0;
+	acc_read(&dataBuffer.xoff, &dataBuffer.yoff, &dataBuffer.zoff);
+	dataBuffer.xvar = 0;
+	dataBuffer.yvar = 0;
+	dataBuffer.zvar = 0;
+	dataBuffer.lightIntensity = 0;
+	dataBuffer.temperature = 0;
 }
 
 /*
@@ -157,43 +170,22 @@ void initTimingState(void){
 }
 
 /*
- * Data (Circular) Buffer
+ * implement check here
  */
 
-struct dataCB {
-	int pointer;
-	int8_t x[N_SAMPLE];
-	int8_t y[N_SAMPLE];
-	int8_t z[N_SAMPLE];
-	int8_t xoff;
-	int8_t yoff;
-	int8_t zoff;
-	int xvar;
-	int yvar;
-	int zvar;
-	uint32_t lightIntensity;
-	uint32_t temperature;
-};
+static void led7seg_update(void){
+	lcdNumber = (lcdNumber + 1) % 10;
+	led7seg_setChar(lcdNumber + ASCII_Number, 0);
+}
 
-static struct dataCB dataBuffer;
 
-void initAccCB(void){
-	dataBuffer.pointer = 0;
-	acc_read(&dataBuffer.xoff, &dataBuffer.yoff, &dataBuffer.zoff);
-	dataBuffer.xvar = 0;
-	dataBuffer.yvar = 0;
-	dataBuffer.zvar = 0;
-	dataBuffer.lightIntensity = 0;
-	dataBuffer.temperature = 0;
+void nextElements(void){
+	dataBuffer.pointer = (dataBuffer.pointer + 1) % ACCELEROMETER_BUFFER;
 }
 
 /**
- * Accelerometer
+ * Accelerometer Handler
  */
-
-void nextElements(void){
-	dataBuffer.pointer = (dataBuffer.pointer + 1) % N_SAMPLE;
-}
 
 void accelerationHandler(void){
 	nextElements();
@@ -207,25 +199,21 @@ int calcAccVarZ(void){
 	int sumSQz = 0;
 	int index;
 
-	for (index = 0; index < N_SAMPLE; index++){
+	for (index = 0; index < ACCELEROMETER_BUFFER; index++){
 		//dataBuffer.z[index] = dataBuffer.z[index] - dataBuffer.zoff;
 		sumz += dataBuffer.z[index];
 	}
 
-	meanz = sumz / N_SAMPLE;
+	meanz = sumz / ACCELEROMETER_BUFFER;
 
-	for (index = 0; index < N_SAMPLE; index++){
+	for (index = 0; index < ACCELEROMETER_BUFFER; index++){
 		sumSQz += (dataBuffer.z[index] - meanz)*(dataBuffer.z[index] - meanz);
 	}
 
-	dataBuffer.zvar = sumSQz/N_SAMPLE;
+	dataBuffer.zvar = sumSQz/ACCELEROMETER_BUFFER;
 
 	return dataBuffer.zvar;
 }
-
-/*
- * RGB LED
- */
 
 void toggleRGBLed(void) {
 	if (rgbState == 0){
@@ -236,92 +224,54 @@ void toggleRGBLed(void) {
 	rgbState = (rgbState + 1) % 2;
 }
 
-/*
- * 7 Segment
- */
+char* getState(void);
 
-static void led7seg_update(void){
-	lcdNumber = (lcdNumber + 1) % 10;
-	led7seg_setChar(lcdNumber + ASCII_Number, 0);
+void updateOLED(void){
+	sprintf(tempString, "Temp: %d.%d  ", (int) dataBuffer.temperature/10, (int) dataBuffer.temperature%10);
+	sprintf(lightString, "Lux: %d  ", (int) dataBuffer.lightIntensity);
+	sprintf(varString, "Var: %d   ", calcAccVarZ());
+	sprintf(stateString, "State: %s  ", getState());
+	oled_putString(0, 1 + 8, tempString, OLED_COLOR_WHITE,OLED_COLOR_BLACK);
+	oled_putString(0, 1 + 16, lightString, OLED_COLOR_WHITE,OLED_COLOR_BLACK);
+	oled_putString(0, 1 + 24, varString, OLED_COLOR_WHITE,OLED_COLOR_BLACK);
+	oled_putString(0, 1 + 32, stateString, OLED_COLOR_WHITE,OLED_COLOR_BLACK);
 }
+
+void SysTick_Handler(void) {
+	if (msTicks < 5000){
+		msTicks = 5000;
+	}
+	msTicks++;
+	if (msTicks - timeState.accelerationTime > timeState.lastAccTime && i2c0Lock == 0){
+		timeState.lastAccTime = msTicks;
+		i2c0Lock = 1;
+		accelerationHandler();
+		i2c0Lock = 0;
+		if (lightBlocked == 1){
+			light_clearIrqStatus();
+			lightBlocked = 0;
+		}
+	}
+	if (msTicks - lcdTime > timeState.lastLCDTime && spiLock == 0){
+		timeState.lastLCDTime = msTicks;
+		spiLock = 1;
+		led7seg_update();
+		spiLock = 0;
+	}
+	if ((msTicks - RELAY_RGB_TIME > timeState.lastRGBTime) && timeState.state == RELAY){
+		timeState.lastRGBTime = msTicks;
+		toggleRGBLed();
+	}
+}
+
+uint32_t getTicks(void){
+    return msTicks;
+}
+
+
 
 /**
- * UART
- */
-
-void UART3_ENABLE_INT(void){
-	LPC_UART3->IER = 0x1;
-}
-
-void pushCharToStack(uint8_t newChar){
-
-	if (newChar == '\r'){
-		parseMessageReady = 1;
-		return;
-	}
-
-	if ((rearPointer + 1) == CHAR_ARRAY_BUFFER){
-		return;
-	}
-
-	circularCharBuffer[rearPointer] = (char) newChar;
-	rearPointer++;
-}
-
-void parseMessage(void){
-
-	if (parseMessageReady == 0){
-		return;
-	}
-
-	/*
-	 * Sample Message
-	 * #N083_T23.1_L132_V450#/r
-	 */
-
-	if (circularCharBuffer[0] != '#' || circularCharBuffer[21] != '#' || circularCharBuffer[1] != 'N' || circularCharBuffer[6] != 'T' || circularCharBuffer[12] != 'L' || circularCharBuffer[17] != 'V'){
-		if (relayedMessage[1] == '1'){
-			relayedMessage[0] = '\0';
-		}
-		circularCharBuffer[0] = '\0';
-		rearPointer = 0;
-		parseMessageReady = 0;
-		return;
-	}
-
-	strncpy(relayedMessage, circularCharBuffer + 1, MESSAGE_WIDTH);
-	relayedMessage[20] = '\0';
-	circularCharBuffer[0] = '\0';
-	rearPointer = 0;
-	parseMessageReady = 0;
-	return;
-}
-
-void printUARTMessage(void){
-
-	if (dataBuffer.temperature >= 1000){
-		dataBuffer.temperature = 999;
-	}
-
-	if (dataBuffer.lightIntensity >= 1000){
-		tempLightIntensity = 999;
-	}else{
-		tempLightIntensity = dataBuffer.lightIntensity;
-	}
-
-	if(relayedMessage[0] == '\0' || timeState.state != RELAY){
-		sprintf(messageBuffer, "%s_T%02d.%01d_L%03d_V%03d\r", NODE_ID, (int) dataBuffer.temperature/10, (int) dataBuffer.temperature%10, (int) tempLightIntensity, (int) dataBuffer.zvar);
-	}else{
-		sprintf(messageBuffer, "%s_T%02d.%01d_L%03d_V%03d_%s\r", NODE_ID, (int) dataBuffer.temperature/10, (int) dataBuffer.temperature%10, (int) tempLightIntensity, (int) dataBuffer.zvar, relayedMessage);
-		relayedMessage[0] = '\0';
-		relayedMessage[1] = '1';
-	}
-
-	UART_SendString(LPC_UART3, (uint8_t*) messageBuffer);
-}
-
-/*
- * Initialization
+ * Synchronous Serial Port (SSP) is a controller that supports the Serial Peripheral Interface (SPI), 4-wire Synchronous Serial Interface (SSI), and Microwire serial buses
  */
 
 static void init_ssp(void)
@@ -360,6 +310,138 @@ static void init_ssp(void)
 	// Enable SSP peripheral
 	SSP_Cmd(LPC_SSP1, ENABLE);
 
+}
+
+/**
+ * UART
+ */
+
+static uint32_t UART_LOCK = 0;
+static uint32_t parseMessageReady = 0;
+static char circularCharBuffer[CHAR_ARRAY_BUFFER];
+static uint32_t rearPointer = 0;
+static char messageBuffer[CHAR_ARRAY_BUFFER];
+static char relayedMessage[MESSAGE_WIDTH];
+
+void UART3_IRQHandler(void){
+
+	if (UART_LOCK != 0){
+		return;
+	}
+
+	/*
+	UART_GetLineStatus(LPC_UART3);
+	uartReadBuffer;
+	UART3_StdIntHandler();
+	*/
+
+	UART_LOCK = 1;
+
+    if(LPC_UART3->IIR & UART_IIR_INTID_RDA){
+    	while(LPC_UART3->LSR & 0x1){
+			pushCharToStack(LPC_UART3->RBR);
+		}
+    }
+
+    UART_LOCK = 0;
+}
+
+void UART3_DISABLE_INT(void){
+	LPC_UART3->IER = 0;
+}
+
+void UART3_ENABLE_INT(void){
+	LPC_UART3->IER = 0x1;
+}
+
+void pushCharToStack(uint8_t newChar){
+
+
+	if (newChar == '\r'){
+		printf("naisu!");
+		parseMessageReady = 1;
+		return;
+	}
+
+	if ((rearPointer + 1) == CHAR_ARRAY_BUFFER){
+		printf("not naise!");
+		return;
+	}
+
+	circularCharBuffer[rearPointer] = (char) newChar;
+	rearPointer++;
+}
+
+void parseMessage(void){
+
+	printf("WTF6\n");
+
+	if (parseMessageReady == 0){
+		return;
+	}
+
+	while(UART_LOCK == 1){
+		;
+	}
+	UART_LOCK = 1;
+
+	printf("WTF7\n");
+
+	/*
+	 * Sample Message
+	 * #N083_T23.1_L132_V450#/r
+	 */
+
+	if (circularCharBuffer[0] != '#' || circularCharBuffer[21] != '#' || circularCharBuffer[1] != 'N' || circularCharBuffer[6] != 'T' || circularCharBuffer[12] != 'L' || circularCharBuffer[17] != 'V'){
+		relayedMessage[0] = '\0';
+		circularCharBuffer[0] = '\0';
+		rearPointer = 0;
+		parseMessageReady = 0;
+		UART_LOCK = 0;
+		return;
+	}
+
+	printf("WTF8: %s\n", circularCharBuffer);
+
+	strncpy(relayedMessage, circularCharBuffer + 1, MESSAGE_WIDTH);
+	relayedMessage[20] = '\0';
+
+	printf("WTF9: %s\n", relayedMessage);
+
+	circularCharBuffer[0] = '\0';
+	rearPointer = 0;
+	parseMessageReady = 0;
+	UART_LOCK = 0;
+	return;
+}
+
+static uint32_t tempLightIntensity = 0;
+
+void printUARTMessage(void){
+
+	if (dataBuffer.temperature >= 1000){
+		dataBuffer.temperature = 999;
+	}
+
+	if (dataBuffer.lightIntensity >= 1000){
+		tempLightIntensity = 999;
+	}else{
+		tempLightIntensity = dataBuffer.lightIntensity;
+	}
+
+	if(relayedMessage[0] == '\0'){
+		sprintf(messageBuffer, "%s_T%02d.%1d_L%3d_V%03d\r", NODE_ID, (int) dataBuffer.temperature/10, (int) dataBuffer.temperature%10, (int) tempLightIntensity, (int) dataBuffer.zvar);
+	}else{
+		sprintf(messageBuffer, "%s_T%02d.%1d_L%3d_V%03d_%s\r", NODE_ID, (int) dataBuffer.temperature/10, (int) dataBuffer.temperature%10, (int) tempLightIntensity, (int) dataBuffer.zvar, relayedMessage);
+		relayedMessage[0] = '\0';
+	}
+
+	while(UART_LOCK == 1){
+		;
+	}
+	UART_LOCK = 1;
+	UART_SendString(LPC_UART3, (uint8_t*) messageBuffer);
+	UART_LOCK = 0;
 }
 
 void init_xBee() {
@@ -413,6 +495,7 @@ void init_uart(void){
 	PinCfg.Pinnum = 1;
 	PINSEL_ConfigPin(&PinCfg);
 
+	UART_LOCK = 1;
 	UART_Init(LPC_UART3, &uartCfg);
 	UART_TxCmd(LPC_UART3, ENABLE);
 
@@ -422,12 +505,21 @@ void init_uart(void){
 	UART_IntConfig(LPC_UART3, UART_INTCFG_RBR, ENABLE);
 	UART_SendString(LPC_UART3, (uint8_t*)"Jelly UART Initialized.\r\n");
 
+
+	UART_LOCK = 0;
+
 	NVIC_ClearPendingIRQ(UART3_IRQn);
 	NVIC_SetPriority(UART3_IRQn, NVIC_EncodePriority(4,3,0));
 	NVIC_EnableIRQ(UART3_IRQn);
 
 	UART3_ENABLE_INT();
 }
+
+
+
+/**
+ * Inits I2C
+ */
 
 static void init_i2c(void)
 {
@@ -461,12 +553,38 @@ void initSystick() {
 	}
 }
 
+void checkTempLight(void){
+
+	dataBuffer.temperature = temp_read();
+	i2c0Lock = 1;
+	dataBuffer.lightIntensity = light_read();
+	i2c0Lock = 0;
+
+	if (timeState.state == RELAY){
+		return;
+	}
+
+	i2c0Lock = 1;
+	pca9532_setLeds(allLedsOn, 0xffff);
+	i2c0Lock = 0;
+
+	if (dataBuffer.lightIntensity < LIGHT_THRESHOLD){
+		timeState.state = DIM;
+		timeState.accelerationTime = ACC_ST_DIM_RELAY;
+		timeState.tempLightTime = LS_TS_ST_DIM_RELAY;
+	}
+
+	if (dataBuffer.temperature >= TEMP_THRESHOLD){
+		if (buzzerState == 0){
+			buzzerState = 1;
+			activateBuzzer();
+		}
+	}else{
+		buzzerState = 0;
+	}
+}
+
 void buzzer_init(){
-
-	/*
-	 * Enables buzzer ++
-	 */
-
     GPIO_SetDir(2, 1<<0, 1);
     GPIO_SetDir(2, 1<<1, 1);
 
@@ -480,30 +598,34 @@ void buzzer_init(){
     GPIO_ClearValue(2, 1<<13);
 }
 
-static void initLight(void){
-	while (i2c0Lock == 1){
+void activateBuzzer(void) {
+
+	/*
+	 * Handles both OLED and Buzzer
+	 */
+
+	while(spiLock == 1){
 		;
 	}
-	i2c0Lock = 1;
-	light_enable();
-	light_setRange(LIGHT_RANGE_64000);
-	light_setHiThreshold(BRIGHT_CONDITION);
-	light_setLoThreshold(0);
-	light_clearIrqStatus();
-	i2c0Lock = 0;
-}
+	spiLock = 1;
+	oled_fillRect(0,9,95,40,OLED_COLOR_WHITE);
+	oled_putString(0,16, "Buzzer", OLED_COLOR_BLACK, OLED_COLOR_WHITE);
+	spiLock = 0;
 
-static void initOLED(void){
-    spiLock = 1;
-    oled_clearScreen(OLED_COLOR_BLACK);
-    oled_fillRect(0,8,95,8,OLED_COLOR_WHITE);
-    GUI_drawTitlebar();
-    spiLock = 0;
-}
+	while (((FIO_ReadValue(1) >> 31) ^ 0x0)) {
+		GPIO_SetValue(0, 1<<26);
+		Timer0_us_Wait(note / 2);
 
-void init7Seg() {
-	led7seg_init();
-	led7seg_setChar(' ', 0);
+		GPIO_ClearValue(0, 1<<26);
+		Timer0_us_Wait(note / 2);
+	}
+
+	while(spiLock == 1){
+			;
+	}
+	spiLock = 1;
+	oled_fillRect(0,9,95,40,OLED_COLOR_BLACK);
+	spiLock = 0;
 }
 
 void enableButtonsInterrupts(void){
@@ -560,7 +682,7 @@ void enableButtonsInterrupts(void){
 	GPIO_SetDir(2, 1 << 10, 0);
 
 	/*
-	 * Clears interrupt
+	 * Clears interrupt I think
 	 */
 
 	LPC_SC->EXTINT = 1;
@@ -578,241 +700,8 @@ void enableButtonsInterrupts(void){
 	NVIC_SetPriority(EINT3_IRQn, NVIC_EncodePriority(4,2,0));
 	NVIC_EnableIRQ(EINT3_IRQn);
 
-}
 
 
-/*
- * Buzzer
- */
-
-void activateBuzzer(void) {
-
-	/*
-	 * Handles both OLED and Buzzer
-	 */
-
-	while(spiLock == 1){
-		;
-	}
-	spiLock = 1;
-	oled_fillRect(0,9,95,40,OLED_COLOR_WHITE);
-	oled_putString(0,16, "Buzzer", OLED_COLOR_BLACK, OLED_COLOR_WHITE);
-	spiLock = 0;
-
-	while (((FIO_ReadValue(1) >> 31) ^ 0x0)) {
-		GPIO_SetValue(0, 1<<26);
-		Timer0_us_Wait(note / 2);
-
-		GPIO_ClearValue(0, 1<<26);
-		Timer0_us_Wait(note / 2);
-	}
-
-	while(spiLock == 1){
-			;
-	}
-	spiLock = 1;
-	oled_fillRect(0,9,95,40,OLED_COLOR_BLACK);
-	spiLock = 0;
-}
-
-/*
- * Light and Temp
- */
-
-void checkTempLight(void){
-
-	dataBuffer.temperature = temp_read();
-	i2c0Lock = 1;
-	dataBuffer.lightIntensity = light_read();
-	i2c0Lock = 0;
-
-	if (timeState.state == RELAY){
-		return;
-	}
-
-	i2c0Lock = 1;
-	pca9532_setLeds(allLedsOn, 0xffff);
-	i2c0Lock = 0;
-
-	if (dataBuffer.lightIntensity < BRIGHT_CONDITION){
-		timeState.state = DIM;
-		timeState.accelerationTime = ACC_ST_DIM;
-		timeState.tempLightTime = LS_TS_ST_DIM;
-	}
-
-	if (dataBuffer.temperature >= TEMP_WARN){
-		if (buzzerState == 0){
-			buzzerState = 1;
-			activateBuzzer();
-		}
-	}else{
-		buzzerState = 0;
-	}
-}
-
-/*
- * Interrupt Handlers
- */
-
-void EINT0_IRQHandler(void){
-
-	if (timeState.state != RELAY){
-
-		timeState.state = RELAY;
-		timeState.accelerationTime = ACC_ST_DIM;
-		timeState.tempLightTime = LS_TS_ST_DIM;
-		i2c0Lock = 1;
-		pca9532_setLeds(allLedsOff, 0xffff);
-		i2c0Lock = 0;
-		toggleRGBLed();
-
-		NVIC_DisableIRQ(EINT3_IRQn);
-
-	}else{
-
-		if (rgbState == 1){
-			GPIO_ClearValue(2, 1);
-			rgbState = 0;
-		}
-
-		i2c0Lock = 1;
-		pca9532_setLeds(allLedsOn, 0xffff);
-		i2c0Lock = 0;
-
-		if (dataBuffer.lightIntensity < BRIGHT_CONDITION){
-			timeState.state = DIM;
-			timeState.accelerationTime = ACC_ST_DIM;
-			timeState.tempLightTime = LS_TS_ST_DIM;
-			light_setHiThreshold(BRIGHT_CONDITION);
-			light_setLoThreshold(0);
-		}else{
-			timeState.state = BRIGHT;
-			timeState.accelerationTime = ACC_ST_BRIGHT;
-			timeState.tempLightTime = LS_TS_ST_BRIGHT;
-			light_setHiThreshold(62000);
-			light_setLoThreshold(BRIGHT_CONDITION);
-		}
-
-		NVIC_EnableIRQ(EINT3_IRQn);
-
-	}
-
-	/*
-	 * Debouncing
-	 */
-
-	uint32_t tempInt = 2500000;
-
-	while(tempInt){
-		tempInt--;
-	}
-
-	if ((LPC_GPIOINT->IO2IntStatF >> 10) & 0x1){
-		LPC_GPIOINT->IO2IntClr = 1 << 10;
-	}
-
-	LPC_SC->EXTINT = 1;
-	NVIC_ClearPendingIRQ(EINT0_IRQn);
-}
-
-void EINT3_IRQHandler(void){
-
-	if ((LPC_GPIOINT->IO2IntStatF >> 5)& 0x1){
-
-		if (i2c0Lock == 1){
-			LPC_GPIOINT->IO2IntClr = (1 << 5);
-			lightBlocked = 1;
-			return;
-		}
-
-		if (timeState.state == DIM){
-			timeState.state = BRIGHT;
-			timeState.accelerationTime = ACC_ST_BRIGHT;
-			timeState.tempLightTime = LS_TS_ST_BRIGHT;
-		    light_setHiThreshold(62000);
-		    light_setLoThreshold(BRIGHT_CONDITION);
-		}else if (timeState.state == BRIGHT){
-			timeState.state = DIM;
-			timeState.accelerationTime = ACC_ST_DIM;
-			timeState.tempLightTime = LS_TS_ST_DIM;
-		    light_setHiThreshold(BRIGHT_CONDITION);
-		    light_setLoThreshold(0);
-		}
-
-		LPC_GPIOINT->IO2IntClr = (1 << 5);
-
-		i2c0Lock = 1;
-		light_clearIrqStatus();
-		i2c0Lock = 0;
-
-	}
-
-	LPC_SC->EXTINT = 1;
-	NVIC_ClearPendingIRQ(EINT3_IRQn);
-}
-
-void UART3_IRQHandler(void){
-
-	/*
-	UART_GetLineStatus(LPC_UART3);
-	uartReadBuffer;
-	UART3_StdIntHandler();
-	*/
-
-    if(LPC_UART3->IIR & UART_IIR_INTID_RDA){
-    	while(LPC_UART3->LSR & 0x1){
-			pushCharToStack(LPC_UART3->RBR);
-		}
-    }
-
-}
-
-void SysTick_Handler(void) {
-
-	/*
-	 * Init msTicks to prevent overflow error
-	 */
-
-	if (msTicks < 5000){
-		msTicks = 5000;
-	}
-
-	msTicks++;
-	if (msTicks - timeState.accelerationTime > timeState.lastAccTime && i2c0Lock == 0){
-		timeState.lastAccTime = msTicks;
-		i2c0Lock = 1;
-		accelerationHandler();
-		i2c0Lock = 0;
-		if (lightBlocked == 1){
-			light_clearIrqStatus();
-			lightBlocked = 0;
-		}
-	}
-	if (msTicks - lcdTime > timeState.lastLCDTime && spiLock == 0){
-		timeState.lastLCDTime = msTicks;
-		spiLock = 1;
-		led7seg_update();
-		spiLock = 0;
-	}
-	if ((msTicks - RELAY_RGB_TIME > timeState.lastRGBTime) && timeState.state == RELAY){
-		timeState.lastRGBTime = msTicks;
-		toggleRGBLed();
-	}
-}
-
-/*
- * GUI
- */
-
-void updateOLED(void){
-	sprintf(tempString, "Temp: %d.%d  ", (int) dataBuffer.temperature/10, (int) dataBuffer.temperature%10);
-	sprintf(lightString, "Lux: %d  ", (int) dataBuffer.lightIntensity);
-	sprintf(varString, "Var: %d   ", calcAccVarZ());
-	sprintf(stateString, "State: %s  ", getState());
-	oled_putString(0, 1 + 8, tempString, OLED_COLOR_WHITE,OLED_COLOR_BLACK);
-	oled_putString(0, 1 + 16, lightString, OLED_COLOR_WHITE,OLED_COLOR_BLACK);
-	oled_putString(0, 1 + 24, varString, OLED_COLOR_WHITE,OLED_COLOR_BLACK);
-	oled_putString(0, 1 + 32, stateString, OLED_COLOR_WHITE,OLED_COLOR_BLACK);
 }
 
 char* getState(void){
@@ -832,12 +721,108 @@ char* getState(void){
 	}
 }
 
-void GUI_drawTitlebar(void){
+void EINT0_IRQHandler(void){
+
+	printf("EINT0\n");
+
+	if (timeState.state != RELAY){
+
+		timeState.state = RELAY;
+		timeState.accelerationTime = ACC_ST_DIM_RELAY;
+		timeState.tempLightTime = LS_TS_ST_DIM_RELAY;
+		i2c0Lock = 1;
+		pca9532_setLeds(allLedsOff, 0xffff);
+		i2c0Lock = 0;
+		toggleRGBLed();
+
+		NVIC_DisableIRQ(EINT3_IRQn);
+
+	}else{
+
+		if (rgbState == 1){
+			GPIO_ClearValue(2, 1);
+			rgbState = 0;
+		}
+
+		i2c0Lock = 1;
+		pca9532_setLeds(allLedsOn, 0xffff);
+		i2c0Lock = 0;
+
+		if (dataBuffer.lightIntensity < LIGHT_THRESHOLD){
+			timeState.state = DIM;
+			timeState.accelerationTime = ACC_ST_DIM_RELAY;
+			timeState.tempLightTime = LS_TS_ST_DIM_RELAY;
+			light_setHiThreshold(LIGHT_THRESHOLD);
+			light_setLoThreshold(0);
+		}else{
+			timeState.state = BRIGHT;
+			timeState.accelerationTime = ACC_ST_BRIGHT;
+			timeState.tempLightTime = LS_TS_ST_BRIGHT;
+			light_setHiThreshold(62000);
+			light_setLoThreshold(LIGHT_THRESHOLD);
+		}
+
+		NVIC_EnableIRQ(EINT3_IRQn);
+
+	}
+
+	if ((LPC_GPIOINT->IO2IntStatF >> 10) & 0x1){
+		printf("WTFlol\n");
+		LPC_GPIOINT->IO2IntClr = 1 << 10;
+	}
+
+
+
+	LPC_SC->EXTINT = 1;
+	LPC_GPIOINT->IO2IntClr = 1 << 10;
+	NVIC_ClearPendingIRQ(EINT0_IRQn);
+}
+
+
+
+void EINT3_IRQHandler(void){
+
+	printf("EINT3\n");
+
+	if ((LPC_GPIOINT->IO2IntStatF >> 5)& 0x1){
+
+		if (i2c0Lock == 1){
+			LPC_GPIOINT->IO2IntClr = (1 << 5);
+			lightBlocked = 1;
+			return;
+		}
+
+		if (timeState.state == DIM){
+			timeState.state = BRIGHT;
+			timeState.accelerationTime = ACC_ST_BRIGHT;
+			timeState.tempLightTime = LS_TS_ST_BRIGHT;
+		    light_setHiThreshold(62000);
+		    light_setLoThreshold(LIGHT_THRESHOLD);
+		}else if (timeState.state == BRIGHT){
+			timeState.state = DIM;
+			timeState.accelerationTime = ACC_ST_DIM_RELAY;
+			timeState.tempLightTime = LS_TS_ST_DIM_RELAY;
+		    light_setHiThreshold(LIGHT_THRESHOLD);
+		    light_setLoThreshold(0);
+		}
+
+		LPC_GPIOINT->IO2IntClr = (1 << 5);
+
+		i2c0Lock = 1;
+		light_clearIrqStatus();
+		i2c0Lock = 0;
+
+	}
+
+	LPC_SC->EXTINT = 1;
+	NVIC_ClearPendingIRQ(EINT3_IRQn);
+}
+
+static void GUI_drawTitlebar(void){
 	//We want to overwrite only the title bar portion which is (0,0) to (95,8)
     oled_fillRect(0,0,95,8,OLED_COLOR_WHITE);							//Black bg
     oled_putString(1, 1, "Edward | Jelly", OLED_COLOR_BLACK, OLED_COLOR_WHITE);	//White text on black bg
 }
-
 
 int main (void) {
 
@@ -846,32 +831,46 @@ int main (void) {
 	 */
 
 	__disable_irq();
+	printf(WELCOME_MESSAGE);
 
 	init_i2c();
     init_ssp();
-	init7Seg();
+
+    led7seg_init();
+    led7seg_setChar(' ',0);
     pca9532_init();
     joystick_init();
     acc_init();
     oled_init();
+
     temp_init(&getTicks);
-    //eeprom_init();
-    initLight();
+    eeprom_init();
+
+    while (i2c0Lock == 1){
+    	;
+    }
+    i2c0Lock = 1;
+    light_enable();
+    light_setRange(LIGHT_RANGE_64000);
+    light_setHiThreshold(LIGHT_THRESHOLD);
+    light_setLoThreshold(0);
+    light_clearIrqStatus();
+    i2c0Lock = 0;
+
     buzzer_init();
     initAccCB();
-    initOLED();
 
+    spiLock = 1;
+    oled_clearScreen(OLED_COLOR_BLACK);
+    oled_fillRect(0,8,95,8,OLED_COLOR_WHITE);
+    GUI_drawTitlebar();
+    spiLock = 0;
 
     initTimingState();
     enableButtonsInterrupts();
     init_uart();
     initSystick();
-
     __enable_irq();
-
-    /*
-     * Main Programme
-     */
 
     while(TRUE){
 
@@ -887,14 +886,15 @@ int main (void) {
 			spiLock = 0;
 		}
 
-    	if (getTicks() - DISTRESS_TIME > timeState.lastParseTime){
+    	if (getTicks() - distressTime > timeState.lastParseTime){
     		timeState.lastParseTime = getTicks();
     		parseMessage();
     	}
 
-    	if (getTicks() - REPORTING_TIME > timeState.lastReportingTime){
+    	if (getTicks() - reportingTime > timeState.lastReportingTime){
 			timeState.lastReportingTime = getTicks();
 			printUARTMessage();
+			printf("%s\n", circularCharBuffer);
 		}
 
 

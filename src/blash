@@ -1,3 +1,55 @@
+void checkTempLight(void){
+
+	dataBuffer.temperature = temp_read();
+	i2c0Lock = 1;
+	dataBuffer.lightIntensity = light_read();
+	i2c0Lock = 0;
+	if (timeState.state == RELAY){
+		return;
+	}
+
+	if (dataBuffer.lightIntensity < LIGHT_THRESHOLD){
+		timeState.state = DIM;
+		timeState.accelerationTime = ACC_ST_DIM_RELAY;
+		timeState.tempLightTime = LS_TS_ST_DIM_RELAY;
+		i2c0Lock = 1;
+		pca9532_setLeds(allLedsOff, 0xffff);
+		i2c0Lock = 0;
+	} else {
+		timeState.state = BRIGHT;
+		timeState.accelerationTime = ACC_ST_BRIGHT;
+		timeState.tempLightTime = LS_TS_ST_BRIGHT;
+		i2c0Lock = 1;
+		pca9532_setLeds(allLedsOn, 0xffff);
+		i2c0Lock = 0;
+		if (rgbState == 1){
+			GPIO_ClearValue(2, 1);
+			rgbState = 0;
+		}
+	}
+
+	if (dataBuffer.temperature >= TEMP_THRESHOLD){
+		if (buzzerState == 0){
+			buzzerState = 1;
+			activateBuzzer();
+		}
+	}else{
+		buzzerState = 0;
+	}
+}
+
+
+
+
+
+
+
+
+
+
+
+
+
 /*
  *
  * EE2024 Project for kicks
