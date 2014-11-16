@@ -60,7 +60,7 @@ const uint16_t allLedsOn = 0xff00;
 const uint16_t allLedsOff = 0x0;
 
 const uint32_t BRIGHT_CONDITION = 800;
-const uint32_t TEMP_WARN = 275; //260
+const uint32_t TEMP_WARN = 260; //260
 
 const uint32_t note = 1703;
 
@@ -241,8 +241,8 @@ void toggleRGBLed(void) {
  */
 
 static void led7seg_update(void){
-	lcdNumber = (lcdNumber + 1) % 10;
 	led7seg_setChar(lcdNumber + ASCII_Number, 0);
+	lcdNumber = (lcdNumber + 1) % 10;
 }
 
 /**
@@ -312,7 +312,9 @@ void printUARTMessage(void){
 	if(relayedMessage[0] == '\0' || timeState.state != RELAY){
 		sprintf(messageBuffer, "%s_T%02d.%01d_L%03d_V%03d\r", NODE_ID, (int) dataBuffer.temperature/10, (int) dataBuffer.temperature%10, (int) tempLightIntensity, (int) dataBuffer.zvar);
 	}else{
-		sprintf(messageBuffer, "%s_T%02d.%01d_L%03d_V%03d_%s\r", NODE_ID, (int) dataBuffer.temperature/10, (int) dataBuffer.temperature%10, (int) tempLightIntensity, (int) dataBuffer.zvar, relayedMessage);
+		sprintf(messageBuffer, "%s_T%02d.%01d_L%03d_V%03d_%s", NODE_ID, (int) dataBuffer.temperature/10, (int) dataBuffer.temperature%10, (int) tempLightIntensity, (int) dataBuffer.zvar, relayedMessage);
+		messageBuffer[41] = '\r';
+		messageBuffer[42] = '\0';
 		relayedMessage[0] = '\0';
 		relayedMessage[1] = '1';
 	}
@@ -511,22 +513,6 @@ void enableButtonsInterrupts(void){
 	PINSEL_CFG_Type PinCfg;
 
 	/*
-	 * SW1 - RESET
-	 */
-
-	/*
-	PinCfg.Funcnum = 0;
-	PinCfg.OpenDrain = 0;
-	PinCfg.Pinmode = 2;
-	PinCfg.Portnum = 0;
-	PinCfg.Pinnum = 0;
-
-
-	LPC_GPIOINT->IO0IntEnF |= 1<<0;
-
-	*/
-
-	/*
 	 * SW4 - ALARM / WAKE UP
 	 */
 
@@ -630,15 +616,23 @@ void checkTempLight(void){
 		return;
 	}
 
-	i2c0Lock = 1;
-	pca9532_setLeds(allLedsOn, 0xffff);
-	i2c0Lock = 0;
-
-	if (dataBuffer.lightIntensity < BRIGHT_CONDITION){
+	if (dataBuffer.lightIntensity <= BRIGHT_CONDITION){
 		timeState.state = DIM;
 		timeState.accelerationTime = ACC_ST_DIM;
 		timeState.tempLightTime = LS_TS_ST_DIM;
+
+		while (i2c0Lock){
+			;
+		}
+		i2c0Lock = 1;
+		light_setHiThreshold(BRIGHT_CONDITION);
+		light_setLoThreshold(0);
+		i2c0Lock = 0;
 	}
+
+	i2c0Lock = 1;
+	pca9532_setLeds(allLedsOn, 0xffff);
+	i2c0Lock = 0;
 
 	if (dataBuffer.temperature >= TEMP_WARN){
 		if (buzzerState == 0){
@@ -689,7 +683,7 @@ void EINT0_IRQHandler(void){
 			timeState.state = BRIGHT;
 			timeState.accelerationTime = ACC_ST_BRIGHT;
 			timeState.tempLightTime = LS_TS_ST_BRIGHT;
-			light_setHiThreshold(62000);
+			light_setHiThreshold(63000);
 			light_setLoThreshold(BRIGHT_CONDITION);
 		}
 
